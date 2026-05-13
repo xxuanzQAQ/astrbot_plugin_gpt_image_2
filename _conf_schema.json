@@ -1,16 +1,22 @@
 {
   "api_base_url": {
-    "description": "APIMart API Base URL",
+    "description": "API Base URL",
     "type": "string",
-    "hint": "默认使用 https://api.apimart.ai/v1；也兼容完整接口 URL，例如 https://api.apimart.ai/v1/images/generations。",
+    "hint": "默认使用 https://api.apimart.ai/v1；也兼容完整接口 URL，例如 https://api.apimart.ai/v1/images/generations。支持 OpenAI/NewAPI 风格同步返回 b64_json，例如 https://newapi-hk.qianye.host/v1。",
     "default": "https://api.apimart.ai/v1"
   },
   "api_key": {
-    "description": "APIMart API Key",
+    "description": "API Key",
     "type": "string",
-    "hint": "在 APIMart 获取的 Bearer Token。注册链接：👉 https://apimart.ai/register?aff=J3ZjCO",
+    "hint": "Bearer Token；可填写 APIMart 或兼容站点的 API Key。APIMart 注册链接：👉 https://apimart.ai/register?aff=J3ZjCO",
     "obvious_hint": true,
     "default": ""
+  },
+  "model": {
+    "description": "模型名称",
+    "type": "string",
+    "hint": "默认 gpt-image-2。若未在命令中指定模型，插件遇到 ChatGPT 上游鉴权失败时会自动尝试 gpt-image-1 兼容参数。",
+    "default": "gpt-image-2"
   },
   "default_size": {
     "description": "默认图片比例",
@@ -47,6 +53,12 @@
     ],
     "default": "1k"
   },
+  "include_resolution": {
+    "description": "请求中附带 resolution 字段",
+    "type": "bool",
+    "hint": "通常保持开启；插件会按模型自动判断，并在接口报 resolution 参数错误时自动去掉重试。关闭后永不发送该字段。",
+    "default": true
+  },
   "official_fallback": {
     "description": "启用官方渠道兜底",
     "type": "bool",
@@ -56,7 +68,7 @@
   "auto_wait": {
     "description": "提交后自动等待结果",
     "type": "bool",
-    "hint": "开启后插件会按建议间隔轮询 /v1/tasks/{task_id}，完成后直接发送图片；关闭后只返回 task_id。",
+    "hint": "异步接口开启后会轮询 /v1/tasks/{task_id}，完成后直接发送图片；同步返回图片数据的接口不需要轮询。",
     "default": true
   },
   "initial_delay": {
@@ -86,7 +98,7 @@
   "max_reference_images": {
     "description": "最多参考图数量",
     "type": "int",
-    "hint": "APIMart gpt-image-2 最多支持 16 张参考图，超过会被截断。",
+    "hint": "gpt-image-2 参考图上限按接口能力处理，插件最多保留 16 张，超过会被截断。",
     "default": 16
   },
   "include_result_link": {
