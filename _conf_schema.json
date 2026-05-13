@@ -118,5 +118,17 @@
     "type": "bool",
     "hint": "开启后发送图片的同时附带结果 URL，方便转存。",
     "default": true
+  },
+  "debug_log_payload": {
+    "description": "记录调试请求日志",
+    "type": "bool",
+    "hint": "开启后在日志中记录脱敏后的请求 payload、响应和参考图提交值；API Key 与 base64 正文不会完整打印。",
+    "default": false
+  },
+  "image_to_image_endpoint": {
+    "description": "图生图接口路径",
+    "type": "string",
+    "hint": "auto 会在 APIMart 使用 /images/generations，在其他兼容站点使用 /images/edits；也可手动填写 /images/generations 或 /images/edits。",
+    "default": "auto"
   }
 }

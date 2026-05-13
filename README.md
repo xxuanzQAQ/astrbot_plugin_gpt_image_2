@@ -54,6 +54,8 @@ pip install -r data/plugins/astrbot_plugin_gpt_image_2/requirements.txt
 | `transient_retry_delay` | 临时上游错误重试间隔，单位秒 | `5` |
 | `max_reference_images` | 最多参考图数量，上限为 16 | `16` |
 | `include_result_link` | 发送图片时是否附带结果 URL | `true` |
+| `debug_log_payload` | 是否记录脱敏后的请求 payload、响应和参考图提交值 | `false` |
+| `image_to_image_endpoint` | 图生图接口路径；`auto`、`/images/generations` 或 `/images/edits` | `auto` |
 
 APIMart 的 `api_key` 获取入口：<https://apimart.ai/register?aff=J3ZjCO>
 
@@ -63,7 +65,7 @@ APIMart 的 `api_key` 获取入口：<https://apimart.ai/register?aff=J3ZjCO>
 https://newapi-hk.qianye.host/v1
 ```
 
-插件会自动适配常见兼容接口参数：OpenAI 风格模型会自动使用像素尺寸并省略 `resolution`；如果接口返回 `resolution` 参数错误，会自动去掉该字段重试；如果默认 `gpt-image-2` 通道报 `chatgpt upstream 401: chat-requirements failed`，会自动尝试 `gpt-image-1` 兼容参数；如果遇到 502/503/504、`context deadline exceeded` 或 `poll error`，会短间隔自动重试。若重试后仍失败，说明接口站点的上游账号/Cookie、模型通道或网关超时时间本身不可用，需要在站点侧处理。
+插件会自动适配常见兼容接口参数：OpenAI 风格模型会自动使用像素尺寸并省略 `resolution`；消息内图片和引用图片会优先转成 base64 data URI 后提交，避免平台临时图片 URL 无法被接口服务访问；图生图在 APIMart 默认继续走 `/images/generations + image_urls`，在其他兼容站点默认走 `/images/edits` 并用 multipart 上传图片；如果接口返回 `resolution` 参数错误，会自动去掉该字段重试；如果默认 `gpt-image-2` 通道报 `chatgpt upstream 401: chat-requirements failed`，会自动尝试 `gpt-image-1` 兼容参数；如果遇到 502/503/504、`context deadline exceeded` 或 `poll error`，会短间隔自动重试。若重试后仍失败，说明接口站点的上游账号/Cookie、模型通道或网关超时时间本身不可用，需要在站点侧处理。
 
 ## 命令
 
@@ -117,15 +119,6 @@ https://newapi-hk.qianye.host/v1
 支持的比例：`auto`、`1:1`、`3:2`、`2:3`、`4:3`、`3:4`、`5:4`、`4:5`、`16:9`、`9:16`、`2:1`、`1:2`、`3:1`、`1:3`、`21:9`、`9:21`。
 
 `4k` 仅支持 `16:9` / `9:16` / `2:1` / `1:2` / `3:1` / `1:3` / `21:9` / `9:21`。
-
-## 隐私与安全
-
-- 不要把 APIMart API Key 写入代码、README、Issue、截图或提交记录；只在 AstrBot 插件配置中填写。
-- 插件本身不会把提示词、参考图或生成结果写入本仓库文件，但请求会发送到你配置的 `api_base_url`。
-- 使用图生图时，消息图片、引用图片、图片 URL 或 base64 图片会作为参考图提交给你配置的接口服务，请避免处理不应上传到第三方服务的敏感图片。
-- `include_result_link` 开启时，生成结果 URL 会随消息发送到聊天中；在群聊或公开频道中可按需关闭。
-- 上传 GitHub 前请确认 `.env`、日志、数据库、运行数据、缓存目录和本地代理配置没有被加入暂存区。
-- 如果 API Key 曾经出现在公开仓库、日志或聊天记录中，请立即在对应服务后台重新生成或撤销旧 Key。
 
 ## 开发
 

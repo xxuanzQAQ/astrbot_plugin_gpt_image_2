@@ -3,6 +3,7 @@ import base64
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -10,6 +11,13 @@ import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+
+try:
+    from astrbot.core.utils.quoted_message.image_resolver import ImageResolver
+    from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
+except Exception:  # pragma: no cover - keep compatibility with older AstrBot builds
+    ImageResolver = None
+    extract_quoted_message_images = None
 
 PLUGIN_NAME = "astrbot_plugin_gpt_image_2"
 REGISTER_URL = "https://apimart.ai/register?aff=J3ZjCO"
@@ -76,6 +84,10 @@ class GPTImage2Plugin(Star):
         self.transient_retry_delay = int(self.config.get("transient_retry_delay", 5))
         self.max_reference_images = int(self.config.get("max_reference_images", 16))
         self.include_result_link = bool(self.config.get("include_result_link", True))
+        self.debug_log_payload = bool(self.config.get("debug_log_payload", False))
+        self.image_to_image_endpoint = str(
+            self.config.get("image_to_image_endpoint", "auto")
+        ).strip()
         self.session: aiohttp.ClientSession | None = None
 
         if not self.api_key:
@@ -102,6 +114,168 @@ class GPTImage2Plugin(Star):
             "Content-Type": "application/json",
         }
 
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    @staticmethod
+    def _summarize_image_value_for_log(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        image = value.strip()
+        lower_image = image.lower()
+        if lower_image.startswith("data:image/"):
+            header, sep, payload = image.partition(",")
+            if sep:
+                return f"{header},<base64:{len(payload)} chars>"
+            return f"<data-image:{len(image)} chars>"
+        if lower_image.startswith("base64://"):
+            return f"base64://<base64:{len(image.removeprefix('base64://'))} chars>"
+        if len(image) > 500:
+            return f"{image[:200]}...<truncated:{len(image)} chars>"
+        return image
+
+    @classmethod
+    def _sanitize_for_log(cls, value: Any, *, key: str = "") -> Any:
+        key_lower = key.lower()
+        if key_lower in {
+            "authorization",
+            "api_key",
+            "apikey",
+            "token",
+            "image",
+            "image[]",
+            "mask",
+        }:
+            return "<redacted>"
+        if key_lower in {"image_urls", "images"} and isinstance(value, list):
+            return [cls._summarize_image_value_for_log(item) for item in value]
+        if key_lower in {"b64_json", "image_base64", "base64"} and isinstance(
+            value,
+            str,
+        ):
+            return f"<base64:{len(value)} chars>"
+        if isinstance(value, dict):
+            return {
+                str(item_key): cls._sanitize_for_log(item_value, key=str(item_key))
+                for item_key, item_value in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._sanitize_for_log(item) for item in value]
+        if isinstance(value, str):
+            return cls._summarize_image_value_for_log(value)
+        return value
+
+    def _log_request_payload(
+        self,
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(payload, dict):
+            logger.info("[GPTImage2] 请求：%s %s", method, url)
+            return
+
+        image_urls = payload.get("image_urls")
+        image_count = len(image_urls) if isinstance(image_urls, list) else 0
+        prompt = str(payload.get("prompt", ""))
+        logger.info(
+            "[GPTImage2] 请求：%s %s model=%s size=%s resolution=%s "
+            "image_urls=%s prompt_len=%s",
+            method,
+            url,
+            payload.get("model"),
+            payload.get("size"),
+            payload.get("resolution", "<omitted>"),
+            image_count,
+            len(prompt),
+        )
+        if image_count:
+            logger.info(
+                "[GPTImage2] 请求参考图：%s",
+                json.dumps(
+                    self._sanitize_for_log(image_urls, key="image_urls"),
+                    ensure_ascii=False,
+                ),
+            )
+        if self.debug_log_payload:
+            logger.info(
+                "[GPTImage2] 请求 headers：%s",
+                json.dumps(
+                    self._sanitize_for_log(self._headers()),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            logger.info(
+                "[GPTImage2] 请求 payload：%s",
+                json.dumps(
+                    self._sanitize_for_log(payload),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+
+    def _log_response_payload(self, status: int, data: Any) -> None:
+        if not self.debug_log_payload:
+            return
+        logger.info(
+            "[GPTImage2] 响应 HTTP %s：%s",
+            status,
+            json.dumps(
+                self._sanitize_for_log(data),
+                ensure_ascii=False,
+                sort_keys=True,
+            )[:3000],
+        )
+
+    def _log_multipart_request(
+        self,
+        method: str,
+        url: str,
+        fields: dict[str, Any],
+        image_uploads: list[tuple[bytes, str, str]],
+    ) -> None:
+        logger.info(
+            "[GPTImage2] 请求：%s %s multipart model=%s size=%s image=%s prompt_len=%s",
+            method,
+            url,
+            fields.get("model"),
+            fields.get("size"),
+            len(image_uploads),
+            len(str(fields.get("prompt", ""))),
+        )
+        logger.info(
+            "[GPTImage2] 请求上传图片：%s",
+            json.dumps(
+                [
+                    {
+                        "filename": filename,
+                        "content_type": content_type,
+                        "bytes": len(data),
+                    }
+                    for data, filename, content_type in image_uploads
+                ],
+                ensure_ascii=False,
+            ),
+        )
+        if self.debug_log_payload:
+            logger.info(
+                "[GPTImage2] 请求 headers：%s",
+                json.dumps(
+                    self._sanitize_for_log(self._auth_headers()),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            logger.info(
+                "[GPTImage2] 请求 form fields：%s",
+                json.dumps(
+                    self._sanitize_for_log(fields),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+
     def _config_error(self) -> str | None:
         if not self.api_base_url.startswith(("http://", "https://")):
             return "API Base URL 配置无效，必须以 http:// 或 https:// 开头。"
@@ -113,12 +287,13 @@ class GPTImage2Plugin(Star):
     def _join_api_url(base_url: str, path: str) -> str:
         base = base_url.rstrip("/")
         normalized_path = "/" + path.lstrip("/")
-        if normalized_path == "/images/generations" and base.endswith(
-            "/images/generations"
-        ):
-            return base
+        image_endpoints = {"/images/generations", "/images/edits"}
+        if normalized_path in image_endpoints:
+            for suffix in image_endpoints:
+                if base.endswith(suffix):
+                    return f"{base[: -len(suffix)]}{normalized_path}"
         if normalized_path.startswith("/tasks/"):
-            for suffix in ("/images/generations",):
+            for suffix in image_endpoints:
                 if base.endswith(suffix):
                     return f"{base[: -len(suffix)]}{normalized_path}"
         return f"{base}{normalized_path}"
@@ -170,6 +345,7 @@ class GPTImage2Plugin(Star):
     ) -> dict[str, Any]:
         session = await self._get_session()
         url = self._join_api_url(self.api_base_url, path)
+        self._log_request_payload(method, url, payload)
         try:
             async with session.request(
                 method,
@@ -192,17 +368,88 @@ class GPTImage2Plugin(Star):
                     ) from exc
 
                 if resp.status >= 400:
+                    self._log_response_payload(resp.status, data)
                     raise GPTImageAPIError(
                         self._format_api_error(data, resp.status),
                         data,
                         resp.status,
                     )
                 if isinstance(data, dict) and data.get("error"):
+                    self._log_response_payload(resp.status, data)
                     raise GPTImageAPIError(
                         self._format_api_error(data, resp.status),
                         data,
                         resp.status,
                     )
+                self._log_response_payload(resp.status, data)
+                return data
+        except TimeoutError as exc:
+            raise RuntimeError(f"请求超时（{self.request_timeout}s）。") from exc
+        except aiohttp.ClientError as exc:
+            raise RuntimeError(f"网络请求失败：{exc}") from exc
+
+    async def _request_multipart(
+        self,
+        method: str,
+        path: str,
+        fields: dict[str, Any],
+        image_uploads: list[tuple[bytes, str, str]],
+    ) -> dict[str, Any]:
+        session = await self._get_session()
+        url = self._join_api_url(self.api_base_url, path)
+        self._log_multipart_request(method, url, fields, image_uploads)
+
+        form = aiohttp.FormData()
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            form.add_field(key, str(value))
+        for data, filename, content_type in image_uploads:
+            form.add_field(
+                "image",
+                data,
+                filename=filename,
+                content_type=content_type,
+            )
+
+        try:
+            async with session.request(
+                method,
+                url,
+                data=form,
+                headers=self._auth_headers(),
+            ) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text) if text else {}
+                except json.JSONDecodeError as exc:
+                    if resp.status >= 400:
+                        raise GPTImageAPIError(
+                            self._format_non_json_http_error(text, resp.status),
+                            text,
+                            resp.status,
+                        ) from exc
+                    raise RuntimeError(
+                        f"HTTP {resp.status}: 返回不是 JSON：{text[:300]}"
+                    ) from exc
+
+                if resp.status >= 400:
+                    self._log_response_payload(resp.status, data)
+                    raise GPTImageAPIError(
+                        self._format_api_error(data, resp.status),
+                        data,
+                        resp.status,
+                    )
+                if isinstance(data, dict) and data.get("error"):
+                    self._log_response_payload(resp.status, data)
+                    raise GPTImageAPIError(
+                        self._format_api_error(data, resp.status),
+                        data,
+                        resp.status,
+                    )
+                self._log_response_payload(resp.status, data)
                 return data
         except TimeoutError as exc:
             raise RuntimeError(f"请求超时（{self.request_timeout}s）。") from exc
@@ -369,10 +616,61 @@ class GPTImage2Plugin(Star):
             payload["official_fallback"] = True
         return payload
 
-    def _iter_image_components(self, chain: list[Any] | None):
+    @staticmethod
+    def _is_apimart_base_url(base_url: str) -> bool:
+        try:
+            host = urlsplit(base_url).netloc.lower()
+        except Exception:
+            return False
+        return host.endswith("apimart.ai")
+
+    @staticmethod
+    def _normalize_endpoint_path(value: str) -> str:
+        endpoint = value.strip()
+        if not endpoint or endpoint.lower() == "auto":
+            return "auto"
+        if endpoint.startswith(("http://", "https://")):
+            parsed = urlsplit(endpoint)
+            endpoint = parsed.path
+        endpoint = "/" + endpoint.lstrip("/")
+        if endpoint.startswith("/v1/"):
+            endpoint = endpoint[3:]
+        if endpoint in {"/generations", "/image/generations"}:
+            return "/images/generations"
+        if endpoint in {"/edits", "/image/edits"}:
+            return "/images/edits"
+        return endpoint
+
+    def _image_to_image_path(self) -> str:
+        endpoint = self._normalize_endpoint_path(self.image_to_image_endpoint)
+        if endpoint != "auto":
+            return endpoint
+        if self._is_apimart_base_url(self.api_base_url):
+            return "/images/generations"
+        return "/images/edits"
+
+    def _edit_form_fields(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fields = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"image_urls", "resolution", "official_fallback"}
+        }
+        fields["size"] = self._ratio_to_openai_size(str(fields.get("size", "auto")))
+        return fields
+
+    def _iter_image_components(
+        self,
+        chain: list[Any] | None,
+        *,
+        include_reply_chain: bool = True,
+    ):
         for comp in chain or []:
             if isinstance(comp, Comp.Reply):
-                yield from self._iter_image_components(getattr(comp, "chain", None))
+                if include_reply_chain:
+                    yield from self._iter_image_components(
+                        getattr(comp, "chain", None),
+                        include_reply_chain=include_reply_chain,
+                    )
             elif isinstance(comp, Comp.Image):
                 yield comp
 
@@ -397,21 +695,236 @@ class GPTImage2Plugin(Star):
         mime = self._guess_mime_from_base64(clean_data)
         return f"data:{mime};base64,{clean_data}"
 
-    async def _image_component_to_api_value(self, comp: Comp.Image) -> str | None:
-        value = (
-            getattr(comp, "url", None) or getattr(comp, "file", None) or ""
-        ).strip()
-        if value.startswith(("http://", "https://", "data:image/")):
-            return value
-        if value.startswith("base64://"):
-            return self._base64_to_data_uri(value)
+    @staticmethod
+    def _image_extension_from_mime(mime: str) -> str:
+        return {
+            "image/jpeg": "jpg",
+            "image/png": "png",
+            "image/gif": "gif",
+            "image/webp": "webp",
+        }.get(mime.lower(), "png")
+
+    @staticmethod
+    def _parse_data_uri_image(value: str) -> tuple[bytes, str] | None:
+        match = re.match(r"^data:(image/[^;]+);base64,(.+)$", value.strip(), re.S)
+        if not match:
+            return None
+        mime = match.group(1).lower()
+        try:
+            data = base64.b64decode(match.group(2), validate=False)
+        except Exception:
+            return None
+        return data, mime
+
+    async def _download_image_upload(self, url: str) -> tuple[bytes, str] | None:
+        session = await self._get_session()
+        try:
+            async with session.get(url) as resp:
+                data = await resp.read()
+                if resp.status >= 400:
+                    logger.warning(
+                        "[GPTImage2] 下载参考图失败：HTTP %s %s",
+                        resp.status,
+                        url[:200],
+                    )
+                    return None
+                content_type = resp.headers.get("Content-Type", "").split(";", 1)[0]
+        except Exception as exc:
+            logger.warning("[GPTImage2] 下载参考图失败：%s (%s)", url[:200], exc)
+            return None
+
+        if not content_type.startswith("image/"):
+            content_type = self._guess_mime_from_base64(base64.b64encode(data).decode())
+        return data, content_type
+
+    async def _image_value_to_upload(
+        self,
+        value: str,
+        index: int,
+    ) -> tuple[bytes, str, str] | None:
+        image = value.strip()
+        parsed = self._parse_data_uri_image(image)
+        if parsed:
+            data, content_type = parsed
+        elif image.startswith("base64://"):
+            base64_data = image.removeprefix("base64://")
+            try:
+                data = base64.b64decode(base64_data, validate=False)
+            except Exception:
+                return None
+            content_type = self._guess_mime_from_base64(base64_data)
+        elif image.startswith(("http://", "https://")):
+            downloaded = await self._download_image_upload(image)
+            if not downloaded:
+                return None
+            data, content_type = downloaded
+        else:
+            data_uri = await self._value_to_data_uri(image)
+            if not data_uri:
+                return None
+            parsed = self._parse_data_uri_image(data_uri)
+            if not parsed:
+                return None
+            data, content_type = parsed
+
+        if not data:
+            return None
+        ext = self._image_extension_from_mime(content_type)
+        return data, f"reference_{index}.{ext}", content_type
+
+    async def _build_edit_uploads(
+        self,
+        image_urls: list[str],
+    ) -> list[tuple[bytes, str, str]]:
+        uploads: list[tuple[bytes, str, str]] = []
+        for index, image in enumerate(image_urls, 1):
+            upload = await self._image_value_to_upload(image, index)
+            if upload:
+                uploads.append(upload)
+            else:
+                logger.warning(
+                    "[GPTImage2] 参考图无法转为 /images/edits 上传文件：%s",
+                    self._summarize_image_value_for_log(image),
+                )
+        return uploads
+
+    async def _value_to_data_uri(self, value: str) -> str | None:
+        image = value.strip()
+        if not image:
+            return None
+        if image.startswith("data:image/"):
+            return image
+        if image.startswith("base64://"):
+            return self._base64_to_data_uri(image)
+        try:
+            data = await Comp.Image(file=image).convert_to_base64()
+        except Exception:
+            return None
+        return self._base64_to_data_uri(data) if data else None
+
+    async def _reference_value_to_api_value(
+        self,
+        event: AstrMessageEvent,
+        value: Any,
+        *,
+        prefer_base64: bool,
+        resolve_remote: bool = True,
+    ) -> str | None:
+        if not isinstance(value, str):
+            return None
+        image = value.strip()
+        if not image:
+            return None
+
+        if image.startswith("data:image/"):
+            return image
+        if image.startswith("base64://"):
+            return self._base64_to_data_uri(image)
+
+        if prefer_base64:
+            data_uri = await self._value_to_data_uri(image)
+            if data_uri:
+                return data_uri
+
+        if image.startswith(("http://", "https://")):
+            return image
+
+        if not prefer_base64:
+            data_uri = await self._value_to_data_uri(image)
+            if data_uri:
+                return data_uri
+
+        if resolve_remote and ImageResolver is not None:
+            try:
+                resolved_refs = await ImageResolver(event).resolve_for_llm([image])
+            except Exception as exc:
+                logger.warning(
+                    "[GPTImage2] 解析参考图失败：%s (%s)",
+                    self._summarize_image_value_for_log(image),
+                    exc,
+                )
+                resolved_refs = []
+            for resolved_ref in resolved_refs:
+                resolved = await self._reference_value_to_api_value(
+                    event,
+                    resolved_ref,
+                    prefer_base64=prefer_base64,
+                    resolve_remote=False,
+                )
+                if resolved:
+                    return resolved
+
+        return None
+
+    async def _image_component_to_api_value(
+        self,
+        event: AstrMessageEvent,
+        comp: Comp.Image,
+    ) -> str | None:
+        candidates: list[str] = []
+        for attr in ("url", "file", "path"):
+            value = getattr(comp, attr, None)
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            if value and value not in candidates:
+                candidates.append(value)
+
+        for candidate in candidates:
+            image = await self._reference_value_to_api_value(
+                event,
+                candidate,
+                prefer_base64=True,
+            )
+            if image:
+                return image
 
         try:
             data = await comp.convert_to_base64()
         except Exception as exc:
-            logger.warning("[GPTImage2] Failed to convert reference image: %s", exc)
+            logger.warning("[GPTImage2] 转换消息参考图失败：%s", exc)
             return None
         return self._base64_to_data_uri(data) if data else None
+
+    async def _collect_quoted_reference_images(
+        self,
+        event: AstrMessageEvent,
+    ) -> list[str]:
+        if extract_quoted_message_images is None:
+            return []
+
+        reply_components = [
+            comp
+            for comp in getattr(event.message_obj, "message", []) or []
+            if isinstance(comp, Comp.Reply)
+        ]
+        images: list[str] = []
+        for reply in reply_components:
+            try:
+                quoted_refs = await extract_quoted_message_images(event, reply)
+            except Exception as exc:
+                logger.warning(
+                    "[GPTImage2] 提取引用图片失败：reply_id=%s, error=%s",
+                    getattr(reply, "id", None),
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+            for ref in quoted_refs:
+                image = await self._reference_value_to_api_value(
+                    event,
+                    ref,
+                    prefer_base64=True,
+                )
+                if image:
+                    images.append(image)
+                else:
+                    logger.warning(
+                        "[GPTImage2] 引用图片无法转换为接口可用格式：%s",
+                        self._summarize_image_value_for_log(ref),
+                    )
+        return images
 
     async def _collect_reference_images(
         self,
@@ -419,20 +932,58 @@ class GPTImage2Plugin(Star):
         explicit_images: list[str],
     ) -> list[str]:
         images: list[str] = []
+        explicit_count = 0
+        message_count = 0
+        quoted_count = 0
         for image in explicit_images:
-            if image.startswith(("http://", "https://", "data:image/")):
-                images.append(image)
-            elif image.startswith("base64://"):
-                images.append(self._base64_to_data_uri(image))
+            api_value = await self._reference_value_to_api_value(
+                event,
+                image,
+                prefer_base64=False,
+            )
+            if api_value:
+                images.append(api_value)
+                explicit_count += 1
+            else:
+                logger.warning(
+                    "[GPTImage2] --images 参考图无法转换为接口可用格式：%s",
+                    self._summarize_image_value_for_log(image),
+                )
 
-        for comp in self._iter_image_components(event.message_obj.message):
-            image = await self._image_component_to_api_value(comp)
+        for comp in self._iter_image_components(
+            event.message_obj.message,
+            include_reply_chain=extract_quoted_message_images is None,
+        ):
+            image = await self._image_component_to_api_value(event, comp)
             if image:
                 images.append(image)
+                message_count += 1
 
+        quoted_images = await self._collect_quoted_reference_images(event)
+        images.extend(quoted_images)
+        quoted_count = len(quoted_images)
         deduped = list(dict.fromkeys(images))
         limit = max(1, min(self.max_reference_images, 16))
-        return deduped[:limit]
+        limited = deduped[:limit]
+        logger.info(
+            "[GPTImage2] 参考图收集：explicit=%s message=%s quoted=%s total=%s/%s",
+            explicit_count,
+            message_count,
+            quoted_count,
+            len(limited),
+            len(deduped),
+        )
+        if not limited:
+            logger.info("[GPTImage2] 未收集到参考图，本次会按文生图提交。")
+        elif self.debug_log_payload:
+            logger.info(
+                "[GPTImage2] 参考图提交值：%s",
+                json.dumps(
+                    self._sanitize_for_log(limited, key="image_urls"),
+                    ensure_ascii=False,
+                ),
+            )
+        return limited
 
     @staticmethod
     def _normalize_image_ref(
@@ -682,7 +1233,24 @@ class GPTImage2Plugin(Star):
         self,
         payload: dict[str, Any],
     ) -> tuple[str, list[str]]:
-        data = await self._request("POST", "/images/generations", payload)
+        image_urls = payload.get("image_urls")
+        endpoint = (
+            self._image_to_image_path()
+            if isinstance(image_urls, list) and image_urls
+            else "/images/generations"
+        )
+        if endpoint == "/images/edits":
+            uploads = await self._build_edit_uploads(image_urls)
+            if not uploads:
+                raise RuntimeError("图生图失败：参考图无法转成 /images/edits 上传文件。")
+            data = await self._request_multipart(
+                "POST",
+                endpoint,
+                self._edit_form_fields(payload),
+                uploads,
+            )
+        else:
+            data = await self._request("POST", endpoint, payload)
         item = self._first_data_item(data)
         task_id = str(
             item.get("task_id")
