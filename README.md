@@ -121,32 +121,3 @@ pip install -r data/plugins/astrbot_plugin_gpt_image_2/requirements.txt
 | `_conf_schema.json` | AstrBot 插件配置 schema |
 | `metadata.yaml` | 插件元信息 |
 | `requirements.txt` | Python 依赖 |
-
-格式化和检查：
-
-```bash
-uv run ruff format .
-uv run ruff check .
-```
-
-## 发布到 GitHub
-
-如果插件目录位于 `AstrBot/data/plugins`，通常会被上层 AstrBot 仓库忽略。请在本插件目录内作为独立仓库操作，不要从 AstrBot 根目录执行 `git add`。
-
-可在本目录执行：
-
-```bash
-git init
-git add README.md main.py _conf_schema.json metadata.yaml requirements.txt .gitignore .gitattributes
-git commit -m "feat: initial release"
-git branch -M main
-git remote add origin https://github.com/xxuanzQAQ/astrbot_plugin_gpt_image_2.git
-git push -u origin main
-```
-
-提交前建议再检查一次：
-
-```bash
-git status --short
-git diff --cached
-```
