@@ -1,0 +1,6 @@
+name: astrbot_plugin_gpt_image_2
+display_name: "GPT-Image-2 生图"
+desc: "基于 APIMart gpt-image-2 的 AstrBot 生图插件，支持文生图、图生图、任务查询和 1K/2K/4K 输出。"
+version: v1.0.0
+author: xxuanzQAQ
+repo: "https://github.com/xxuanzQAQ/astrbot_plugin_gpt_image_2"

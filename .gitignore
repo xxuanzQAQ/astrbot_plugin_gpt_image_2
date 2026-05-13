@@ -1,0 +1,48 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets and runtime config
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# AstrBot/runtime generated data
+logs/
+log/
+data/
+temp/
+tmp/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Local editor and agent state
+.vscode/
+.idea/
+.agents/
+.codex/
+.DS_Store
+Thumbs.db
+
+# Generated media/output
+outputs/
+output/
+generated/
+generated_images/

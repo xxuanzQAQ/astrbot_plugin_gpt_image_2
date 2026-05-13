@@ -1,0 +1,98 @@
+{
+  "api_base_url": {
+    "description": "APIMart API Base URL",
+    "type": "string",
+    "hint": "默认使用 https://api.apimart.ai/v1；也兼容完整接口 URL，例如 https://api.apimart.ai/v1/images/generations。",
+    "default": "https://api.apimart.ai/v1"
+  },
+  "api_key": {
+    "description": "APIMart API Key",
+    "type": "string",
+    "hint": "在 APIMart 获取的 Bearer Token。注册链接：👉 https://apimart.ai/register?aff=J3ZjCO",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "default_size": {
+    "description": "默认图片比例",
+    "type": "string",
+    "hint": "支持 auto、1:1、3:2、2:3、4:3、3:4、5:4、4:5、16:9、9:16、2:1、1:2、3:1、1:3、21:9、9:21，或像素尺寸如 1881x836。",
+    "options": [
+      "auto",
+      "1:1",
+      "3:2",
+      "2:3",
+      "4:3",
+      "3:4",
+      "5:4",
+      "4:5",
+      "16:9",
+      "9:16",
+      "2:1",
+      "1:2",
+      "3:1",
+      "1:3",
+      "21:9",
+      "9:21"
+    ],
+    "default": "1:1"
+  },
+  "default_resolution": {
+    "description": "默认输出分辨率档位",
+    "type": "string",
+    "hint": "4k 仅支持 16:9 / 9:16 / 2:1 / 1:2 / 3:1 / 1:3 / 21:9 / 9:21。",
+    "options": [
+      "1k",
+      "2k",
+      "4k"
+    ],
+    "default": "1k"
+  },
+  "official_fallback": {
+    "description": "启用官方渠道兜底",
+    "type": "bool",
+    "hint": "默认关闭；开启后请求体会传 official_fallback=true。",
+    "default": false
+  },
+  "auto_wait": {
+    "description": "提交后自动等待结果",
+    "type": "bool",
+    "hint": "开启后插件会按建议间隔轮询 /v1/tasks/{task_id}，完成后直接发送图片；关闭后只返回 task_id。",
+    "default": true
+  },
+  "initial_delay": {
+    "description": "首次查询延迟",
+    "type": "int",
+    "hint": "提交任务后等待多少秒再第一次查询，建议 10~20 秒。",
+    "default": 12
+  },
+  "poll_interval": {
+    "description": "轮询间隔",
+    "type": "int",
+    "hint": "每次查询任务状态的间隔秒数，建议 3~5 秒。",
+    "default": 5
+  },
+  "poll_timeout": {
+    "description": "轮询超时",
+    "type": "int",
+    "hint": "自动等待图片结果的最长秒数。",
+    "default": 180
+  },
+  "request_timeout": {
+    "description": "HTTP 请求超时",
+    "type": "int",
+    "hint": "单次提交或查询请求的超时时间，单位秒。",
+    "default": 60
+  },
+  "max_reference_images": {
+    "description": "最多参考图数量",
+    "type": "int",
+    "hint": "APIMart gpt-image-2 最多支持 16 张参考图，超过会被截断。",
+    "default": 16
+  },
+  "include_result_link": {
+    "description": "结果附带图片链接",
+    "type": "bool",
+    "hint": "开启后发送图片的同时附带结果 URL，方便转存。",
+    "default": true
+  }
+}
