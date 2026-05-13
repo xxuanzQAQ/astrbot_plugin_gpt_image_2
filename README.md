@@ -50,6 +50,8 @@ pip install -r data/plugins/astrbot_plugin_gpt_image_2/requirements.txt
 | `poll_interval` | 轮询间隔，单位秒 | `5` |
 | `poll_timeout` | 自动等待结果的最长时间，单位秒 | `180` |
 | `request_timeout` | 单次 HTTP 请求超时，单位秒 | `60` |
+| `transient_retries` | 502/503/504 等临时上游错误重试次数 | `2` |
+| `transient_retry_delay` | 临时上游错误重试间隔，单位秒 | `5` |
 | `max_reference_images` | 最多参考图数量，上限为 16 | `16` |
 | `include_result_link` | 发送图片时是否附带结果 URL | `true` |
 
@@ -61,7 +63,7 @@ APIMart 的 `api_key` 获取入口：<https://apimart.ai/register?aff=J3ZjCO>
 https://newapi-hk.qianye.host/v1
 ```
 
-插件会自动适配常见兼容接口参数：OpenAI 风格模型会自动使用像素尺寸并省略 `resolution`；如果接口返回 `resolution` 参数错误，会自动去掉该字段重试；如果默认 `gpt-image-2` 通道报 `chatgpt upstream 401: chat-requirements failed`，会自动尝试 `gpt-image-1` 兼容参数。若重试后仍失败，说明接口站点的上游账号/Cookie 或模型通道本身不可用，需要在站点侧处理。
+插件会自动适配常见兼容接口参数：OpenAI 风格模型会自动使用像素尺寸并省略 `resolution`；如果接口返回 `resolution` 参数错误，会自动去掉该字段重试；如果默认 `gpt-image-2` 通道报 `chatgpt upstream 401: chat-requirements failed`，会自动尝试 `gpt-image-1` 兼容参数；如果遇到 502/503/504、`context deadline exceeded` 或 `poll error`，会短间隔自动重试。若重试后仍失败，说明接口站点的上游账号/Cookie、模型通道或网关超时时间本身不可用，需要在站点侧处理。
 
 ## 命令
 

@@ -95,6 +95,18 @@
     "hint": "单次提交或查询请求的超时时间，单位秒。",
     "default": 60
   },
+  "transient_retries": {
+    "description": "临时上游错误重试次数",
+    "type": "int",
+    "hint": "提交图片时遇到 502/503/504、context deadline exceeded、poll error 等临时错误会自动重试。",
+    "default": 2
+  },
+  "transient_retry_delay": {
+    "description": "临时错误重试间隔",
+    "type": "int",
+    "hint": "每次临时上游错误重试前等待的秒数。",
+    "default": 5
+  },
   "max_reference_images": {
     "description": "最多参考图数量",
     "type": "int",

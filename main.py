@@ -34,6 +34,7 @@ SUPPORTED_SIZES = {
 }
 FOUR_K_SIZES = {"16:9", "9:16", "2:1", "1:2", "3:1", "1:3", "21:9", "9:21"}
 SUPPORTED_RESOLUTIONS = {"1k", "2k", "4k"}
+TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504, 522, 524}
 
 
 class GPTImageAPIError(RuntimeError):
@@ -71,6 +72,8 @@ class GPTImage2Plugin(Star):
         self.poll_interval = int(self.config.get("poll_interval", 5))
         self.poll_timeout = int(self.config.get("poll_timeout", 180))
         self.request_timeout = int(self.config.get("request_timeout", 60))
+        self.transient_retries = int(self.config.get("transient_retries", 2))
+        self.transient_retry_delay = int(self.config.get("transient_retry_delay", 5))
         self.max_reference_images = int(self.config.get("max_reference_images", 16))
         self.include_result_link = bool(self.config.get("include_result_link", True))
         self.session: aiohttp.ClientSession | None = None
@@ -140,6 +143,15 @@ class GPTImage2Plugin(Star):
     @staticmethod
     def _api_error_hint(code: Any, message: Any) -> str:
         text = f"{code} {message}".lower()
+        if (
+            str(code) in {"502", "503", "504", "522", "524"}
+            or "context deadline exceeded" in text
+            or "gateway time" in text
+        ):
+            return (
+                "\n提示：这是接口站点或上游模型服务超时/网关错误，"
+                "插件会自动短间隔重试；如果多次失败，需要稍后再试或更换可用通道。"
+            )
         if "chat-requirements failed" in text or "chatgpt upstream 401" in text:
             return (
                 "\n提示：这是接口站点转发到 ChatGPT 上游时的鉴权失败。"
@@ -169,6 +181,12 @@ class GPTImage2Plugin(Star):
                 try:
                     data = json.loads(text) if text else {}
                 except json.JSONDecodeError as exc:
+                    if resp.status >= 400:
+                        raise GPTImageAPIError(
+                            self._format_non_json_http_error(text, resp.status),
+                            text,
+                            resp.status,
+                        ) from exc
                     raise RuntimeError(
                         f"HTTP {resp.status}: 返回不是 JSON：{text[:300]}"
                     ) from exc
@@ -190,6 +208,23 @@ class GPTImage2Plugin(Star):
             raise RuntimeError(f"请求超时（{self.request_timeout}s）。") from exc
         except aiohttp.ClientError as exc:
             raise RuntimeError(f"网络请求失败：{exc}") from exc
+
+    @staticmethod
+    def _format_non_json_http_error(text: str, status: int) -> str:
+        body = re.sub(r"\s+", " ", text).strip()
+        if "<html" in body.lower():
+            if "504" in body or status == 504:
+                body = "网关超时"
+            elif "502" in body or status == 502:
+                body = "上游网关错误"
+            elif "503" in body or status == 503:
+                body = "服务暂不可用"
+            else:
+                body = body[:300]
+        else:
+            body = body[:300]
+        hint = GPTImage2Plugin._api_error_hint(status, body)
+        return f"HTTP {status}: {body}{hint}"
 
     @staticmethod
     def _first_data_item(data: dict[str, Any]) -> dict[str, Any]:
@@ -535,6 +570,28 @@ class GPTImage2Plugin(Star):
         return "chat-requirements failed" in text or "chatgpt upstream 401" in text
 
     @staticmethod
+    def _is_transient_upstream_error(exc: Exception) -> bool:
+        status = getattr(exc, "status", None)
+        if isinstance(status, int) and status in TRANSIENT_STATUS_CODES:
+            return True
+        text = GPTImage2Plugin._api_exception_text(exc)
+        markers = {
+            "bad gateway",
+            "gateway timeout",
+            "gateway time-out",
+            "upstream timeout",
+            "upstream timed out",
+            "context deadline exceeded",
+            "context canceled",
+            "poll error",
+            "temporarily unavailable",
+            "service unavailable",
+            "connection reset",
+            "timeout awaiting",
+        }
+        return any(marker in text for marker in markers)
+
+    @staticmethod
     def _payload_signature(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -585,10 +642,27 @@ class GPTImage2Plugin(Star):
         allow_model_fallback: bool = True,
     ) -> tuple[str, list[str]]:
         attempted = {self._payload_signature(payload)}
+        transient_attempts = 0
         while True:
             try:
                 return await self._submit_generation_once(payload)
             except GPTImageAPIError as exc:
+                if (
+                    self._is_transient_upstream_error(exc)
+                    and transient_attempts < max(self.transient_retries, 0)
+                ):
+                    transient_attempts += 1
+                    delay = max(self.transient_retry_delay, 1)
+                    logger.warning(
+                        "[GPTImage2] 上游临时错误，%ss 后自动重试第 %s/%s 次：%s",
+                        delay,
+                        transient_attempts,
+                        max(self.transient_retries, 0),
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
                 retry = self._retry_payload_for_error(
                     payload,
                     exc,
@@ -636,7 +710,18 @@ class GPTImage2Plugin(Star):
         deadline = asyncio.get_running_loop().time() + self.poll_timeout
         last_data: dict[str, Any] = {}
         while asyncio.get_running_loop().time() < deadline:
-            data = await self._get_task(task_id)
+            try:
+                data = await self._get_task(task_id)
+            except GPTImageAPIError as exc:
+                if self._is_transient_upstream_error(exc):
+                    last_data = {"error": str(exc)}
+                    logger.warning(
+                        "[GPTImage2] 查询任务遇到上游临时错误，将继续轮询：%s",
+                        exc,
+                    )
+                    await asyncio.sleep(max(self.poll_interval, 3))
+                    continue
+                raise
             last_data = data
             task = self._first_data_item(data)
             status = str(task.get("status", "")).lower()
