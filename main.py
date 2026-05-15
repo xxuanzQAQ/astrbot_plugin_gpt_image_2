@@ -43,6 +43,110 @@ SUPPORTED_SIZES = {
 FOUR_K_SIZES = {"16:9", "9:16", "2:1", "1:2", "3:1", "1:3", "21:9", "9:21"}
 SUPPORTED_RESOLUTIONS = {"1k", "2k", "4k"}
 TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504, 522, 524}
+NETWORK_STATUS_CODES = {408, 500, 502, 503, 504, 522, 524}
+API_STATUS_CODES = {401, 402, 403, 429}
+
+SAFETY_ERROR_MARKERS = (
+    "guardrail",
+    "guardrails",
+    "content_policy",
+    "content policy",
+    "policy_violation",
+    "policy violation",
+    "content_filter",
+    "content filter",
+    "moderation",
+    "safety",
+    "unsafe",
+    "inappropriate",
+    "violat",
+    "审核",
+    "内容安全",
+    "安全策略",
+    "安全审核",
+    "风控",
+    "违规",
+    "不合规",
+    "敏感内容",
+)
+MODEL_FIELD_MARKERS = ("model", "模型", "resolution", "size")
+MODEL_ERROR_MARKERS = (
+    "not found",
+    "not exist",
+    "does not exist",
+    "unsupported",
+    "not support",
+    "not supported",
+    "invalid",
+    "unknown",
+    "unrecognized",
+    "not allowed",
+    "not permitted",
+    "extra_forbidden",
+    "不存在",
+    "不支持",
+    "无效",
+    "未知",
+    "错误",
+    "不允许",
+)
+API_ERROR_MARKERS = (
+    "invalid_api_key",
+    "incorrect api key",
+    "api key",
+    "apikey",
+    "auth_required",
+    "unauthorized",
+    "forbidden",
+    "permission",
+    "insufficient_quota",
+    "quota",
+    "rate_limit",
+    "rate limit",
+    "billing",
+    "balance",
+    "credit",
+    "payment",
+    "账户",
+    "账号",
+    "鉴权",
+    "认证",
+    "授权",
+    "权限",
+    "额度",
+    "余额",
+    "欠费",
+    "限流",
+    "充值",
+)
+NETWORK_ERROR_MARKERS = (
+    "bad gateway",
+    "gateway timeout",
+    "gateway time-out",
+    "gateway time",
+    "upstream timeout",
+    "upstream timed out",
+    "context deadline exceeded",
+    "context canceled",
+    "poll error",
+    "temporarily unavailable",
+    "service unavailable",
+    "connection reset",
+    "connection refused",
+    "cannot connect",
+    "server disconnected",
+    "timeout awaiting",
+    "timed out",
+    "dns",
+    "proxy",
+    "网关超时",
+    "上游网关",
+    "服务暂不可用",
+    "连接失败",
+    "连接被重置",
+    "请求超时",
+    "未响应",
+)
 
 
 class GPTImageAPIError(RuntimeError):
@@ -300,38 +404,173 @@ class GPTImage2Plugin(Star):
 
     @staticmethod
     def _format_api_error(data: Any, status: int | None = None) -> str:
+        code, message, error_type = GPTImage2Plugin._extract_api_error(data, status)
+        category = GPTImage2Plugin._classify_api_error(
+            status,
+            code,
+            message,
+            error_type,
+        )
+        details = GPTImage2Plugin._format_error_details(status, code, error_type)
+        hint = GPTImage2Plugin._api_error_hint(
+            code,
+            message,
+            status=status,
+            error_type=error_type,
+            category=category,
+        )
+        return f"{category}{details}: {message}{hint}"
+
+    @staticmethod
+    def _extract_api_error(
+        data: Any,
+        status: int | None = None,
+    ) -> tuple[Any, str, str]:
+        code: Any = status
+        message: Any = data
+        error_type = ""
         if isinstance(data, dict):
             error = data.get("error")
             if isinstance(error, dict):
-                code = error.get("code", status)
-                message = error.get("message", "未知错误")
-                error_type = error.get("type", "api_error")
-                hint = GPTImage2Plugin._api_error_hint(code, message)
-                return f"API 错误 {code} ({error_type}): {message}{hint}"
-            code = data.get("code", status)
-            message = data.get("message") or data.get("msg")
-            if message:
-                hint = GPTImage2Plugin._api_error_hint(code, message)
-                return f"API 错误 {code}: {message}{hint}"
-        return f"API 错误 {status}: {data}"
+                code = error.get("code", data.get("code", status))
+                message = (
+                    error.get("message")
+                    or data.get("message")
+                    or data.get("msg")
+                    or "未知错误"
+                )
+                error_type = str(error.get("type") or data.get("type") or "api_error")
+            elif error:
+                code = data.get("code", status)
+                message = error
+                error_type = str(data.get("type") or "api_error")
+            else:
+                code = data.get("code", status)
+                message = data.get("message") or data.get("msg") or data
+                error_type = str(data.get("type") or "")
+        if isinstance(message, (dict, list)):
+            message = json.dumps(
+                GPTImage2Plugin._compact_response_for_error(message),
+                ensure_ascii=False,
+            )
+        return code, str(message), error_type
 
     @staticmethod
-    def _api_error_hint(code: Any, message: Any) -> str:
-        text = f"{code} {message}".lower()
+    def _format_error_details(
+        status: int | None,
+        code: Any,
+        error_type: str = "",
+    ) -> str:
+        parts: list[str] = []
+        if status is not None:
+            parts.append(f"HTTP {status}")
+        if code is not None and code != status:
+            parts.append(f"code={code}")
+        if error_type:
+            parts.append(error_type)
+        return f"（{' / '.join(parts)}）" if parts else ""
+
+    @staticmethod
+    def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _classify_api_error(
+        status: int | None,
+        code: Any,
+        message: Any,
+        error_type: str = "",
+    ) -> str:
+        text = f"{status or ''} {code or ''} {error_type} {message}".lower()
+        if GPTImage2Plugin._contains_any(text, SAFETY_ERROR_MARKERS):
+            return "内容安全审核拦截"
+        if GPTImage2Plugin._contains_any(
+            text,
+            MODEL_FIELD_MARKERS,
+        ) and GPTImage2Plugin._contains_any(text, MODEL_ERROR_MARKERS):
+            return "模型配置错误"
+        if GPTImage2Plugin._contains_any(text, API_ERROR_MARKERS):
+            return "API 接口错误"
         if (
-            str(code) in {"502", "503", "504", "522", "524"}
-            or "context deadline exceeded" in text
-            or "gateway time" in text
+            isinstance(status, int)
+            and status in NETWORK_STATUS_CODES
+            or GPTImage2Plugin._contains_any(text, NETWORK_ERROR_MARKERS)
         ):
+            return "网络异常"
+        if isinstance(status, int) and status in API_STATUS_CODES:
+            return "API 接口错误"
+        return "API 接口错误"
+
+    @staticmethod
+    def _api_error_hint(
+        code: Any,
+        message: Any,
+        *,
+        status: int | None = None,
+        error_type: str = "",
+        category: str = "",
+    ) -> str:
+        text = f"{status or ''} {code or ''} {error_type} {message}".lower()
+        if category == "内容安全审核拦截":
             return (
-                "\n提示：这是接口站点或上游模型服务超时/网关错误，"
-                "插件会自动短间隔重试；如果多次失败，需要稍后再试或更换可用通道。"
+                "\n提示：提示词或参考图触发了内容安全审核。请删除敏感、违规或易被误判的描述后重试。"
             )
         if "chat-requirements failed" in text or "chatgpt upstream 401" in text:
             return (
                 "\n提示：这是接口站点转发到 ChatGPT 上游时的鉴权失败。"
                 "插件会在可行时自动尝试 OpenAI 风格图像模型；如果仍失败，"
                 "请检查该站点上游账号/Cookie 或模型通道。"
+            )
+        if category == "模型配置错误":
+            return (
+                "\n提示：请检查插件配置里的模型名、size、resolution 或当前接口是否支持该模型参数。"
+            )
+        if category == "API 接口错误":
+            if GPTImage2Plugin._contains_any(
+                text,
+                (
+                    "quota",
+                    "billing",
+                    "balance",
+                    "credit",
+                    "payment",
+                    "额度",
+                    "余额",
+                    "欠费",
+                    "充值",
+                ),
+            ):
+                return "\n提示：接口额度、余额或计费状态异常，请检查服务商后台。"
+            if GPTImage2Plugin._contains_any(
+                text,
+                ("rate_limit", "rate limit", "限流"),
+            ):
+                return "\n提示：接口触发限流，请稍后重试，或检查服务商后台的频率限制。"
+            if GPTImage2Plugin._contains_any(
+                text,
+                (
+                    "invalid_api_key",
+                    "incorrect api key",
+                    "api key",
+                    "apikey",
+                    "auth_required",
+                    "unauthorized",
+                    "forbidden",
+                    "鉴权",
+                    "认证",
+                    "授权",
+                    "权限",
+                ),
+            ):
+                return "\n提示：请检查 API Key 是否正确、是否过期，以及该 Key 是否有当前接口权限。"
+        if category == "网络异常" or (
+            str(status or code) in {"502", "503", "504", "522", "524"}
+            or "context deadline exceeded" in text
+            or "gateway time" in text
+        ):
+            return (
+                "\n提示：这是接口站点或上游模型服务超时/网关错误，"
+                "插件会自动短间隔重试；如果多次失败，需要稍后再试或更换可用通道。"
             )
         if "auth_required" in text:
             return "\n提示：上游要求鉴权，请检查接口站点、API Key 或当前模型通道。"
@@ -384,9 +623,11 @@ class GPTImage2Plugin(Star):
                 self._log_response_payload(resp.status, data)
                 return data
         except TimeoutError as exc:
-            raise RuntimeError(f"请求超时（{self.request_timeout}s）。") from exc
+            raise RuntimeError(
+                f"网络异常：请求超时（{self.request_timeout}s）。请检查接口站点、代理或网络连接。"
+            ) from exc
         except aiohttp.ClientError as exc:
-            raise RuntimeError(f"网络请求失败：{exc}") from exc
+            raise RuntimeError(f"网络异常：接口未响应或连接失败：{exc}") from exc
 
     async def _request_multipart(
         self,
@@ -452,9 +693,11 @@ class GPTImage2Plugin(Star):
                 self._log_response_payload(resp.status, data)
                 return data
         except TimeoutError as exc:
-            raise RuntimeError(f"请求超时（{self.request_timeout}s）。") from exc
+            raise RuntimeError(
+                f"网络异常：请求超时（{self.request_timeout}s）。请检查接口站点、代理或网络连接。"
+            ) from exc
         except aiohttp.ClientError as exc:
-            raise RuntimeError(f"网络请求失败：{exc}") from exc
+            raise RuntimeError(f"网络异常：接口未响应或连接失败：{exc}") from exc
 
     @staticmethod
     def _format_non_json_http_error(text: str, status: int) -> str:
@@ -470,8 +713,42 @@ class GPTImage2Plugin(Star):
                 body = body[:300]
         else:
             body = body[:300]
-        hint = GPTImage2Plugin._api_error_hint(status, body)
-        return f"HTTP {status}: {body}{hint}"
+        category = GPTImage2Plugin._classify_api_error(
+            status,
+            status,
+            body,
+            "http_error",
+        )
+        hint = GPTImage2Plugin._api_error_hint(
+            status,
+            body,
+            status=status,
+            error_type="http_error",
+            category=category,
+        )
+        return f"{category}（HTTP {status}）: {body}{hint}"
+
+    @staticmethod
+    def _stringify_error_message(error: Any) -> str:
+        if isinstance(error, (dict, list)):
+            return json.dumps(
+                GPTImage2Plugin._compact_response_for_error(error),
+                ensure_ascii=False,
+            )
+        return str(error)
+
+    @staticmethod
+    def _format_task_error(error: Any) -> str:
+        message = GPTImage2Plugin._stringify_error_message(error)
+        category = GPTImage2Plugin._classify_api_error(None, None, message)
+        hint = GPTImage2Plugin._api_error_hint(None, message, category=category)
+        text = message.lower()
+        if category != "API 接口错误" or GPTImage2Plugin._contains_any(
+            text,
+            API_ERROR_MARKERS,
+        ):
+            return f"{category}: {message}{hint}"
+        return f"{message}{hint}"
 
     @staticmethod
     def _first_data_item(data: dict[str, Any]) -> dict[str, Any]:
@@ -1123,24 +1400,42 @@ class GPTImage2Plugin(Star):
     @staticmethod
     def _is_transient_upstream_error(exc: Exception) -> bool:
         status = getattr(exc, "status", None)
+        text = GPTImage2Plugin._api_exception_text(exc)
+        category = GPTImage2Plugin._classify_api_error(
+            status if isinstance(status, int) else None,
+            status,
+            text,
+        )
+        if category in {"内容安全审核拦截", "模型配置错误"}:
+            return False
+        if category == "API 接口错误" and GPTImage2Plugin._contains_any(
+            text,
+            (
+                "invalid_api_key",
+                "incorrect api key",
+                "insufficient_quota",
+                "quota",
+                "billing",
+                "balance",
+                "credit",
+                "payment",
+                "auth_required",
+                "unauthorized",
+                "forbidden",
+                "额度",
+                "余额",
+                "欠费",
+                "充值",
+                "鉴权",
+                "认证",
+                "授权",
+                "权限",
+            ),
+        ):
+            return False
         if isinstance(status, int) and status in TRANSIENT_STATUS_CODES:
             return True
-        text = GPTImage2Plugin._api_exception_text(exc)
-        markers = {
-            "bad gateway",
-            "gateway timeout",
-            "gateway time-out",
-            "upstream timeout",
-            "upstream timed out",
-            "context deadline exceeded",
-            "context canceled",
-            "poll error",
-            "temporarily unavailable",
-            "service unavailable",
-            "connection reset",
-            "timeout awaiting",
-        }
-        return any(marker in text for marker in markers)
+        return GPTImage2Plugin._contains_any(text, NETWORK_ERROR_MARKERS)
 
     @staticmethod
     def _payload_signature(payload: dict[str, Any]) -> str:
@@ -1297,7 +1592,9 @@ class GPTImage2Plugin(Star):
                 return data
             if status in {"failed", "cancelled", "canceled"}:
                 error = task.get("error") or data.get("error") or "任务失败"
-                raise RuntimeError(f"任务 {task_id} 失败：{error}")
+                raise RuntimeError(
+                    f"任务 {task_id} 失败：{self._format_task_error(error)}"
+                )
             await asyncio.sleep(max(self.poll_interval, 3))
         raise RuntimeError(f"任务 {task_id} 查询超时，最后响应：{last_data}")
 
@@ -1330,7 +1627,7 @@ class GPTImage2Plugin(Star):
         elif image_refs:
             lines.append("已解析到图片数据。")
         if error:
-            lines.append(f"错误：{error}")
+            lines.append(f"错误：{self._format_task_error(error)}")
         return "\n".join(lines), image_refs
 
     def _result_chain(self, image_refs: list[str]) -> list[Any]:
