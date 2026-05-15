@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import html
 import json
 import re
+import time
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -186,6 +188,14 @@ class GPTImage2Plugin(Star):
         self.request_timeout = int(self.config.get("request_timeout", 60))
         self.transient_retries = int(self.config.get("transient_retries", 2))
         self.transient_retry_delay = int(self.config.get("transient_retry_delay", 5))
+        self.newapi_log_lookup = bool(self.config.get("newapi_log_lookup", True))
+        self.newapi_log_key = str(self.config.get("newapi_log_key", "")).strip()
+        self.newapi_log_lookup_timeout = int(
+            self.config.get("newapi_log_lookup_timeout", 45)
+        )
+        self.newapi_log_lookup_interval = int(
+            self.config.get("newapi_log_lookup_interval", 5)
+        )
         self.max_reference_images = int(self.config.get("max_reference_images", 16))
         self.include_result_link = bool(self.config.get("include_result_link", True))
         self.debug_log_payload = bool(self.config.get("debug_log_payload", False))
@@ -221,6 +231,15 @@ class GPTImage2Plugin(Star):
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    def _newapi_log_headers(self) -> dict[str, str]:
+        key = self.newapi_log_key or self.api_key
+        headers = {"New-Api-User": key}
+        if key.lower().startswith("bearer "):
+            headers["Authorization"] = key
+        else:
+            headers["Authorization"] = f"Bearer {key}"
+        return headers
+
     @staticmethod
     def _summarize_image_value_for_log(value: Any) -> Any:
         if not isinstance(value, str):
@@ -243,8 +262,10 @@ class GPTImage2Plugin(Star):
         key_lower = key.lower()
         if key_lower in {
             "authorization",
+            "new-api-user",
             "api_key",
             "apikey",
+            "newapi_log_key",
             "token",
             "image",
             "image[]",
@@ -330,6 +351,15 @@ class GPTImage2Plugin(Star):
                 ensure_ascii=False,
                 sort_keys=True,
             )[:3000],
+        )
+
+    def _log_non_json_response(self, status: int, text: str) -> None:
+        if not self.debug_log_payload:
+            return
+        logger.info(
+            "[GPTImage2] 非 JSON 响应 HTTP %s：%s",
+            status,
+            self._sanitize_for_log(text)[:3000],
         )
 
     def _log_multipart_request(
@@ -597,6 +627,7 @@ class GPTImage2Plugin(Star):
                     data = json.loads(text) if text else {}
                 except json.JSONDecodeError as exc:
                     if resp.status >= 400:
+                        self._log_non_json_response(resp.status, text)
                         raise GPTImageAPIError(
                             self._format_non_json_http_error(text, resp.status),
                             text,
@@ -667,6 +698,7 @@ class GPTImage2Plugin(Star):
                     data = json.loads(text) if text else {}
                 except json.JSONDecodeError as exc:
                     if resp.status >= 400:
+                        self._log_non_json_response(resp.status, text)
                         raise GPTImageAPIError(
                             self._format_non_json_http_error(text, resp.status),
                             text,
@@ -701,18 +733,16 @@ class GPTImage2Plugin(Star):
 
     @staticmethod
     def _format_non_json_http_error(text: str, status: int) -> str:
-        body = re.sub(r"\s+", " ", text).strip()
-        if "<html" in body.lower():
-            if "504" in body or status == 504:
-                body = "网关超时"
-            elif "502" in body or status == 502:
-                body = "上游网关错误"
-            elif "503" in body or status == 503:
-                body = "服务暂不可用"
-            else:
-                body = body[:300]
-        else:
-            body = body[:300]
+        body = GPTImage2Plugin._extract_non_json_error_body(text, status)
+        if GPTImage2Plugin._is_upstream_error_text(body):
+            return body
+        if status == 504 and body == "网关超时":
+            return (
+                "同步提交请求被网关超时中断（HTTP 504）。接口没有把最终业务响应返回给插件，"
+                "插件无法自动发送稍后才出现在上游后台的最终错误。"
+                "请检查 NewAPI/反代/上游模型通道的超时配置；如果上游后台最终显示 Guardrails，"
+                "需要修改提示词后重新提交。"
+            )
         category = GPTImage2Plugin._classify_api_error(
             status,
             status,
@@ -727,6 +757,317 @@ class GPTImage2Plugin(Star):
             category=category,
         )
         return f"{category}（HTTP {status}）: {body}{hint}"
+
+    @staticmethod
+    def _extract_non_json_error_body(text: str, status: int) -> str:
+        body = re.sub(r"\s+", " ", text).strip()
+        if not body:
+            return "响应为空"
+
+        if "<html" not in body.lower():
+            return body[:800]
+
+        plain = GPTImage2Plugin._html_to_plain_text(body)
+        upstream = GPTImage2Plugin._extract_upstream_error_text(plain)
+        if upstream:
+            return upstream[:800]
+
+        if "504" in body or status == 504:
+            return "网关超时"
+        if "502" in body or status == 502:
+            return "上游网关错误"
+        if "503" in body or status == 503:
+            return "服务暂不可用"
+        return plain[:800] if plain else body[:800]
+
+    @staticmethod
+    def _html_to_plain_text(text: str) -> str:
+        plain = html.unescape(text)
+        plain = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", plain)
+        plain = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", plain)
+        plain = re.sub(r"(?s)<[^>]+>", " ", plain)
+        return re.sub(r"\s+", " ", plain).strip()
+
+    @staticmethod
+    def _extract_upstream_error_text(text: str) -> str:
+        status_match = re.search(r"\bstatus_code\s*=\s*\d{3}\s*,?\s*.+", text, re.I | re.S)
+        if status_match:
+            return status_match.group(0).strip()
+        if GPTImage2Plugin._contains_any(
+            text.lower(),
+            SAFETY_ERROR_MARKERS + MODEL_ERROR_MARKERS + API_ERROR_MARKERS,
+        ):
+            return text.strip()
+        return ""
+
+    @staticmethod
+    def _extract_embedded_status_code(text: str) -> int | None:
+        match = re.search(r"\bstatus_code\s*=\s*(\d{3})\b", text, re.I)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    @staticmethod
+    def _is_upstream_error_text(text: str) -> bool:
+        if GPTImage2Plugin._extract_embedded_status_code(text) is not None:
+            return True
+        lower_text = text.lower()
+        generic_gateway_errors = {"网关超时", "上游网关错误", "服务暂不可用", "响应为空"}
+        if lower_text in generic_gateway_errors:
+            return False
+        return GPTImage2Plugin._contains_any(
+            lower_text,
+            SAFETY_ERROR_MARKERS + MODEL_ERROR_MARKERS + API_ERROR_MARKERS,
+        )
+
+    def _newapi_management_base_url(self) -> str:
+        parts = urlsplit(self.api_base_url)
+        path = parts.path.rstrip("/")
+        for suffix in (
+            "/v1/images/generations",
+            "/v1/images/edits",
+            "/v1",
+        ):
+            if path.endswith(suffix):
+                path = path[: -len(suffix)].rstrip("/")
+                break
+        return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+    def _join_management_url(self, path: str) -> str:
+        return f"{self._newapi_management_base_url().rstrip('/')}/{path.lstrip('/')}"
+
+    @staticmethod
+    def _is_submit_gateway_timeout(exc: Exception) -> bool:
+        status = getattr(exc, "status", None)
+        if status != 504:
+            return False
+        text = GPTImage2Plugin._api_exception_text(exc)
+        return "gateway timeout" in text or "网关超时" in text or "http 504" in text
+
+    async def _lookup_newapi_log_error_after_timeout(
+        self,
+        payload: dict[str, Any],
+        since_timestamp: float,
+    ) -> str | None:
+        if not self.newapi_log_lookup:
+            return None
+        if not (self.newapi_log_key or self.api_key):
+            return None
+
+        deadline = asyncio.get_running_loop().time() + max(
+            self.newapi_log_lookup_timeout,
+            0,
+        )
+        interval = max(self.newapi_log_lookup_interval, 1)
+        while True:
+            data = await self._fetch_newapi_log_payload(payload)
+            error = self._extract_newapi_log_error(data, payload, since_timestamp)
+            if error:
+                return error
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(interval)
+
+    async def _fetch_newapi_log_payload(self, payload: dict[str, Any]) -> Any:
+        session = await self._get_session()
+        headers = self._newapi_log_headers()
+        model = str(payload.get("model", "")).strip()
+        params = {
+            "p": "0",
+            "page": "1",
+            "size": "10",
+        }
+        if model:
+            params["model_name"] = model
+
+        results: list[Any] = []
+        for path in ("/api/log/self", "/api/log/self/search"):
+            url = self._join_management_url(path)
+            try:
+                async with session.get(url, headers=headers, params=params) as resp:
+                    text = await resp.text()
+                    if resp.status >= 400:
+                        self._log_non_json_response(resp.status, text)
+                        continue
+                    try:
+                        data = json.loads(text) if text else {}
+                    except json.JSONDecodeError:
+                        self._log_non_json_response(resp.status, text)
+                        continue
+                    self._log_response_payload(resp.status, data)
+                    results.append(data)
+            except (TimeoutError, aiohttp.ClientError) as exc:
+                logger.warning("[GPTImage2] 查询 NewAPI 日志失败：%s", exc)
+        return results
+
+    @classmethod
+    def _extract_newapi_log_error(
+        cls,
+        data: Any,
+        payload: dict[str, Any],
+        since_timestamp: float,
+    ) -> str | None:
+        model = str(payload.get("model", "")).strip().lower()
+        for item in cls._iter_log_items(data):
+            if not cls._is_recent_log_item(item, since_timestamp):
+                continue
+            if model and not cls._log_item_model_matches(item, model):
+                continue
+            error = cls._extract_error_from_log_item(item)
+            if error:
+                return error
+        return None
+
+    @classmethod
+    def _iter_log_items(cls, data: Any):
+        if isinstance(data, list):
+            for item in data:
+                yield from cls._iter_log_items(item)
+            return
+        if not isinstance(data, dict):
+            return
+
+        log_keys = (
+            "items",
+            "logs",
+            "rows",
+            "records",
+            "list",
+            "data",
+        )
+        yielded_nested = False
+        for key in log_keys:
+            value = data.get(key)
+            if isinstance(value, (list, dict)):
+                yielded_nested = True
+                yield from cls._iter_log_items(value)
+        if not yielded_nested:
+            yield data
+
+    @staticmethod
+    def _is_recent_log_item(item: dict[str, Any], since_timestamp: float) -> bool:
+        for key in (
+            "created_time",
+            "created_at",
+            "createdAt",
+            "timestamp",
+            "time",
+            "request_time",
+            "requestTime",
+        ):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                timestamp = float(value)
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000
+                return timestamp >= since_timestamp - 15
+        return True
+
+    @staticmethod
+    def _log_item_model_matches(item: dict[str, Any], model: str) -> bool:
+        for key in ("model", "model_name", "modelName"):
+            value = item.get(key)
+            if isinstance(value, str) and model in value.lower():
+                return True
+        return not any(key in item for key in ("model", "model_name", "modelName"))
+
+    @classmethod
+    def _extract_error_from_log_item(cls, item: dict[str, Any]) -> str | None:
+        status = item.get("status_code") or item.get("status") or item.get("code")
+        message = (
+            item.get("error")
+            or item.get("message")
+            or item.get("content")
+            or item.get("response")
+        )
+        if status and message:
+            error = cls._extract_error_text(message)
+            if error:
+                if re.search(r"\bstatus_code\s*=", error, re.I):
+                    return error
+                return f"status_code={status}, {error}"
+
+        for key in (
+            "error",
+            "message",
+            "content",
+            "response",
+            "response_body",
+            "responseBody",
+            "detail",
+            "details",
+            "reason",
+            "remark",
+        ):
+            if key not in item:
+                continue
+            error = cls._extract_error_text(item[key])
+            if error:
+                return error
+
+        return cls._extract_error_text(
+            {
+                key: value
+                for key, value in item.items()
+                if key.lower() not in {"prompt", "request", "request_body", "input"}
+            }
+        )
+
+    @classmethod
+    def _extract_error_text(cls, value: Any) -> str | None:
+        if isinstance(value, dict):
+            status = value.get("status_code") or value.get("status") or value.get("code")
+            message = value.get("message") or value.get("error") or value.get("content")
+            if status and message:
+                text = cls._extract_error_text(message)
+                if text:
+                    if re.search(r"\bstatus_code\s*=", text, re.I):
+                        return text
+                    return f"status_code={status}, {text}"
+            for key in (
+                "error",
+                "message",
+                "content",
+                "response",
+                "response_body",
+                "responseBody",
+                "detail",
+                "details",
+                "reason",
+            ):
+                if key in value:
+                    text = cls._extract_error_text(value[key])
+                    if text:
+                        return text
+            return None
+        if isinstance(value, list):
+            for item in value:
+                text = cls._extract_error_text(item)
+                if text:
+                    return text
+            return None
+        if not isinstance(value, str):
+            return None
+
+        text = value.strip()
+        if not text:
+            return None
+        if text.startswith(("{", "[")):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                parsed_text = cls._extract_error_text(parsed)
+                if parsed_text:
+                    return parsed_text
+        if "<html" in text.lower():
+            text = cls._html_to_plain_text(text)
+
+        upstream = cls._extract_upstream_error_text(text)
+        if upstream and cls._is_upstream_error_text(upstream):
+            return upstream
+        return None
 
     @staticmethod
     def _stringify_error_message(error: Any) -> str:
@@ -1490,9 +1831,21 @@ class GPTImage2Plugin(Star):
         attempted = {self._payload_signature(payload)}
         transient_attempts = 0
         while True:
+            attempt_started_at = time.time()
             try:
                 return await self._submit_generation_once(payload)
             except GPTImageAPIError as exc:
+                if self._is_submit_gateway_timeout(exc):
+                    logger.warning(
+                        "[GPTImage2] 提交遇到 HTTP 504，尝试从 NewAPI 后台日志读取最终错误。"
+                    )
+                    log_error = await self._lookup_newapi_log_error_after_timeout(
+                        payload,
+                        attempt_started_at,
+                    )
+                    if log_error:
+                        raise RuntimeError(log_error) from exc
+
                 if (
                     self._is_transient_upstream_error(exc)
                     and transient_attempts < max(self.transient_retries, 0)

@@ -92,7 +92,7 @@
   "request_timeout": {
     "description": "HTTP 请求超时",
     "type": "int",
-    "hint": "单次提交或查询请求的超时时间，单位秒。",
+    "hint": "单次提交或查询请求的超时时间，单位秒。若接口返回 HTTP 504，通常是 NewAPI/反代/上游通道先超时，还需要在站点侧调高超时。",
     "default": 60
   },
   "transient_retries": {
@@ -105,6 +105,30 @@
     "description": "临时错误重试间隔",
     "type": "int",
     "hint": "每次临时上游错误重试前等待的秒数。",
+    "default": 5
+  },
+  "newapi_log_lookup": {
+    "description": "NewAPI 504 后查询后台日志",
+    "type": "bool",
+    "hint": "开启后，同步生图接口提交遇到 HTTP 504 时，会尝试查询 NewAPI /api/log/self 和 /api/log/self/search，找到后台最终错误后直接返回该错误。",
+    "default": true
+  },
+  "newapi_log_key": {
+    "description": "NewAPI 日志接口鉴权 Key",
+    "type": "string",
+    "hint": "可填写 NewAPI 后台日志接口需要的 New-Api-User 或用户鉴权 Token。留空时默认尝试使用 api_key。",
+    "default": ""
+  },
+  "newapi_log_lookup_timeout": {
+    "description": "NewAPI 日志查询超时",
+    "type": "int",
+    "hint": "HTTP 504 后等待后台日志落库的最长秒数。",
+    "default": 45
+  },
+  "newapi_log_lookup_interval": {
+    "description": "NewAPI 日志查询间隔",
+    "type": "int",
+    "hint": "HTTP 504 后轮询后台日志的间隔秒数。",
     "default": 5
   },
   "max_reference_images": {

@@ -52,6 +52,10 @@ pip install -r data/plugins/astrbot_plugin_gpt_image_2/requirements.txt
 | `request_timeout` | 单次 HTTP 请求超时，单位秒 | `60` |
 | `transient_retries` | 502/503/504 等临时上游错误重试次数 | `2` |
 | `transient_retry_delay` | 临时上游错误重试间隔，单位秒 | `5` |
+| `newapi_log_lookup` | NewAPI 同步提交 504 后是否查询后台日志并返回最终错误 | `true` |
+| `newapi_log_key` | NewAPI 日志接口鉴权 Key；留空默认尝试使用 `api_key` | 空 |
+| `newapi_log_lookup_timeout` | 504 后等待后台日志落库的最长秒数 | `45` |
+| `newapi_log_lookup_interval` | 504 后查询后台日志的间隔秒数 | `5` |
 | `max_reference_images` | 最多参考图数量，上限为 16 | `16` |
 | `include_result_link` | 发送图片时是否附带结果 URL | `true` |
 | `debug_log_payload` | 是否记录脱敏后的请求 payload、响应和参考图提交值 | `false` |
@@ -65,7 +69,7 @@ APIMart 的 `api_key` 获取入口：<https://apimart.ai/register?aff=J3ZjCO>
 https://newapi-hk.qianye.host/v1
 ```
 
-插件会自动适配常见兼容接口参数：OpenAI 风格模型会自动使用像素尺寸并省略 `resolution`；消息内图片和引用图片会优先转成 base64 data URI 后提交，避免平台临时图片 URL 无法被接口服务访问；图生图在 APIMart 默认继续走 `/images/generations + image_urls`，在其他兼容站点默认走 `/images/edits` 并用 multipart 上传图片；如果接口返回 `resolution` 参数错误，会自动去掉该字段重试；如果默认 `gpt-image-2` 通道报 `chatgpt upstream 401: chat-requirements failed`，会自动尝试 `gpt-image-1` 兼容参数；如果遇到 502/503/504、`context deadline exceeded` 或 `poll error`，会短间隔自动重试。错误信息会按 API 接口错误、模型配置错误、网络异常、内容安全审核拦截分类展示；若重试后仍失败，说明接口站点的上游账号/Cookie、模型通道或网关超时时间本身不可用，需要在站点侧处理。
+插件会自动适配常见兼容接口参数：OpenAI 风格模型会自动使用像素尺寸并省略 `resolution`；消息内图片和引用图片会优先转成 base64 data URI 后提交，避免平台临时图片 URL 无法被接口服务访问；图生图在 APIMart 默认继续走 `/images/generations + image_urls`，在其他兼容站点默认走 `/images/edits` 并用 multipart 上传图片；如果接口返回 `resolution` 参数错误，会自动去掉该字段重试；如果默认 `gpt-image-2` 通道报 `chatgpt upstream 401: chat-requirements failed`，会自动尝试 `gpt-image-1` 兼容参数；如果遇到 502/503/504、`context deadline exceeded` 或 `poll error`，会短间隔自动重试。错误信息会按 API 接口错误、模型配置错误、网络异常、内容安全审核拦截分类展示；当网关错误页面中包含明确的上游业务错误正文时，会优先原样返回上游报错；如果 NewAPI 同步提交阶段被网关 504 中断，插件会尝试查询 NewAPI 后台日志并返回稍后落库的最终上游错误。若重试后仍失败，说明接口站点的上游账号/Cookie、模型通道或网关超时时间本身不可用，需要在站点侧处理。
 
 ## 命令
 
