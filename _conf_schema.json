@@ -65,6 +65,23 @@
     "hint": "默认关闭；开启后请求体会传 official_fallback=true。",
     "default": false
   },
+  "api_mode": {
+    "description": "接口模式",
+    "type": "string",
+    "hint": "auto 会按模型和 Base URL 自动选择；images 使用 /images/generations 或 /images/edits；chat 使用 /chat/completions，适配 gemini-3.1-flash-image 等模型。",
+    "options": [
+      "auto",
+      "images",
+      "chat"
+    ],
+    "default": "auto"
+  },
+  "chat_temperature": {
+    "description": "Chat Completions 温度",
+    "type": "float",
+    "hint": "api_mode=chat 或 --api-mode chat 时传给 /chat/completions 的 temperature。",
+    "default": 0.7
+  },
   "auto_wait": {
     "description": "提交后自动等待结果",
     "type": "bool",

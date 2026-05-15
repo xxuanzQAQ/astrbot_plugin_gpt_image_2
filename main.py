@@ -181,6 +181,8 @@ class GPTImage2Plugin(Star):
         ).strip()
         self.include_resolution = bool(self.config.get("include_resolution", True))
         self.official_fallback = bool(self.config.get("official_fallback", False))
+        self.api_mode = str(self.config.get("api_mode", "auto")).strip().lower()
+        self.chat_temperature = float(self.config.get("chat_temperature", 0.7))
         self.auto_wait = bool(self.config.get("auto_wait", True))
         self.initial_delay = int(self.config.get("initial_delay", 12))
         self.poll_interval = int(self.config.get("poll_interval", 5))
@@ -413,6 +415,8 @@ class GPTImage2Plugin(Star):
     def _config_error(self) -> str | None:
         if not self.api_base_url.startswith(("http://", "https://")):
             return "API Base URL 配置无效，必须以 http:// 或 https:// 开头。"
+        if self.api_mode not in {"auto", "images", "image", "chat", "chat_completions"}:
+            return "api_mode 配置无效，仅支持 auto / images / chat。"
         if not self.api_key:
             return f"请先在插件配置里填写 API Key。\n注册链接：👉 {REGISTER_URL}"
         return None
@@ -421,13 +425,13 @@ class GPTImage2Plugin(Star):
     def _join_api_url(base_url: str, path: str) -> str:
         base = base_url.rstrip("/")
         normalized_path = "/" + path.lstrip("/")
-        image_endpoints = {"/images/generations", "/images/edits"}
-        if normalized_path in image_endpoints:
-            for suffix in image_endpoints:
+        endpoints = {"/images/generations", "/images/edits", "/chat/completions"}
+        if normalized_path in endpoints:
+            for suffix in endpoints:
                 if base.endswith(suffix):
                     return f"{base[: -len(suffix)]}{normalized_path}"
         if normalized_path.startswith("/tasks/"):
-            for suffix in image_endpoints:
+            for suffix in endpoints:
                 if base.endswith(suffix):
                     return f"{base[: -len(suffix)]}{normalized_path}"
         return f"{base}{normalized_path}"
@@ -826,6 +830,7 @@ class GPTImage2Plugin(Star):
         for suffix in (
             "/v1/images/generations",
             "/v1/images/edits",
+            "/v1/chat/completions",
             "/v1",
         ):
             if path.endswith(suffix):
@@ -1113,6 +1118,13 @@ class GPTImage2Plugin(Star):
     def _parse_bool(value: str) -> bool:
         return value.lower() in {"1", "true", "yes", "y", "on", "是", "开", "开启"}
 
+    @staticmethod
+    def _parse_float(value: str, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _parse_options(self, text: str) -> tuple[dict[str, str], str]:
         options: dict[str, str] = {}
         prompt_parts: list[str] = []
@@ -1154,6 +1166,45 @@ class GPTImage2Plugin(Star):
     @staticmethod
     def _model_supports_resolution(model: str) -> bool:
         return model.strip().lower().startswith("gpt-image-2")
+
+    @staticmethod
+    def _is_chat_completions_model(model: str) -> bool:
+        normalized = model.strip().lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "gemini",
+                "flash-image",
+                "image-preview",
+                "nano-banana",
+            )
+        )
+
+    @staticmethod
+    def _base_url_points_to_chat_completions(base_url: str) -> bool:
+        try:
+            path = urlsplit(base_url).path.rstrip("/").lower()
+        except Exception:
+            return False
+        return path.endswith("/chat/completions")
+
+    def _api_mode_for_request(self, model: str, options: dict[str, str]) -> str:
+        configured = (
+            options.get("api_mode")
+            or options.get("mode")
+            or options.get("endpoint_mode")
+            or self.api_mode
+        )
+        normalized = configured.strip().lower().replace("-", "_")
+        if normalized in {"chat", "chat_completions", "chatcompletions"}:
+            return "chat"
+        if normalized in {"images", "image", "image_generations", "generations"}:
+            return "images"
+        if self._base_url_points_to_chat_completions(self.api_base_url):
+            return "chat"
+        if self._is_chat_completions_model(model):
+            return "chat"
+        return "images"
 
     @staticmethod
     def _ratio_to_openai_size(size: str) -> str:
@@ -1208,6 +1259,15 @@ class GPTImage2Plugin(Star):
         image_urls: list[str],
     ) -> dict[str, Any]:
         model = options.get("model", self.model).strip() or self.model
+        api_mode = self._api_mode_for_request(model, options)
+        if api_mode == "chat":
+            return self._build_chat_completions_payload(
+                prompt,
+                options,
+                image_urls,
+                model,
+            )
+
         size = options.get("size", self.default_size).strip()
         size = self._adapt_size_for_model(model, size)
         resolution = options.get("resolution", self.default_resolution).strip().lower()
@@ -1232,6 +1292,33 @@ class GPTImage2Plugin(Star):
             )
         elif self.official_fallback:
             payload["official_fallback"] = True
+        payload["_api_mode"] = "images"
+        return payload
+
+    def _build_chat_completions_payload(
+        self,
+        prompt: str,
+        options: dict[str, str],
+        image_urls: list[str],
+        model: str,
+    ) -> dict[str, Any]:
+        temperature = self._parse_float(
+            options.get("temperature", ""),
+            self.chat_temperature,
+        )
+        if image_urls:
+            content: str | list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for image in image_urls:
+                content.append({"type": "image_url", "image_url": {"url": image}})
+        else:
+            content = prompt
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": temperature,
+            "_api_mode": "chat",
+        }
         return payload
 
     @staticmethod
@@ -1272,9 +1359,14 @@ class GPTImage2Plugin(Star):
             key: value
             for key, value in payload.items()
             if key not in {"image_urls", "resolution", "official_fallback"}
+            and not key.startswith("_")
         }
         fields["size"] = self._ratio_to_openai_size(str(fields.get("size", "auto")))
         return fields
+
+    @staticmethod
+    def _strip_internal_payload_fields(payload: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in payload.items() if not key.startswith("_")}
 
     def _iter_image_components(
         self,
@@ -1627,6 +1719,19 @@ class GPTImage2Plugin(Star):
             return f"base64://{image}"
         return None
 
+    @classmethod
+    def _extract_image_refs_from_text(cls, text: str) -> list[str]:
+        refs: list[str] = []
+        for match in re.finditer(r"data:image/[^;\s]+;base64,[A-Za-z0-9+/=]+", text):
+            ref = cls._normalize_image_ref(match.group(0))
+            if ref:
+                refs.append(ref)
+        for match in re.finditer(r"https?://[^\s)\"'<>]+", text):
+            url = match.group(0).rstrip(".,，。")
+            if re.search(r"\.(png|jpe?g|webp|gif)(\?|$)", url, re.I):
+                refs.append(url)
+        return refs
+
     @staticmethod
     def _extract_image_refs(value: Any) -> list[str]:
         refs: list[str] = []
@@ -1642,6 +1747,9 @@ class GPTImage2Plugin(Star):
             )
             if ref:
                 refs.append(ref)
+                return
+            if isinstance(item, str):
+                refs.extend(GPTImage2Plugin._extract_image_refs_from_text(item))
 
         if isinstance(value, dict):
             result = value.get("result")
@@ -1659,14 +1767,18 @@ class GPTImage2Plugin(Star):
 
             for key in ("url", "image_url", "download_url"):
                 append(value.get(key))
-            for key in ("b64_json", "image_base64", "base64"):
+            for key in ("b64_json", "image_base64", "base64", "data"):
                 append(value.get(key), allow_raw_base64=True)
+            for key in ("content", "text"):
+                append(value.get(key))
 
             for item in value.values():
                 refs.extend(GPTImage2Plugin._extract_image_refs(item))
         elif isinstance(value, list):
             for item in value:
                 refs.extend(GPTImage2Plugin._extract_image_refs(item))
+        elif isinstance(value, str):
+            append(value)
         return list(dict.fromkeys(refs))
 
     @staticmethod
@@ -1881,6 +1993,22 @@ class GPTImage2Plugin(Star):
         self,
         payload: dict[str, Any],
     ) -> tuple[str, list[str]]:
+        api_mode = str(payload.get("_api_mode", "images"))
+        if api_mode == "chat":
+            data = await self._request(
+                "POST",
+                "/chat/completions",
+                self._strip_internal_payload_fields(payload),
+            )
+            image_refs = self._extract_image_refs(data)
+            if not image_refs:
+                compact = self._compact_response_for_error(data)
+                raise RuntimeError(
+                    "聊天补全接口返回成功但未解析到图片数据："
+                    f"{json.dumps(compact, ensure_ascii=False)[:1500]}"
+                )
+            return "", image_refs
+
         image_urls = payload.get("image_urls")
         endpoint = (
             self._image_to_image_path()
@@ -1898,7 +2026,11 @@ class GPTImage2Plugin(Star):
                 uploads,
             )
         else:
-            data = await self._request("POST", endpoint, payload)
+            data = await self._request(
+                "POST",
+                endpoint,
+                self._strip_internal_payload_fields(payload),
+            )
         item = self._first_data_item(data)
         task_id = str(
             item.get("task_id")
@@ -2107,6 +2239,7 @@ class GPTImage2Plugin(Star):
 用法：
 /gpt生图 一只橘猫坐在窗台上看夕阳，水彩画风格 --size 16:9 --resolution 2k
 /gptimage 生成 星空下的古老城堡 --size 16:9 --resolution 4k
+/gpt生图 一只橘猫坐在窗台上看夕阳 --model gemini-3.1-flash-image --api-mode chat
 /gptimage 查询 task_xxx
 
 图生图：
@@ -2114,6 +2247,8 @@ class GPTImage2Plugin(Star):
 
 常用参数：
 --model gpt-image-2
+--api-mode images|chat
+--temperature 0.7
 --size 1:1|16:9|9:16|auto
 --resolution 1k|2k|4k
 --no-resolution true|false
